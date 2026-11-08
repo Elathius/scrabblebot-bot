@@ -206,7 +206,17 @@ export class WordEngine {
   }
 
   // Best reward among words at most `d` tiles short of the rack, length >= minLen.
+  private withinMemo = new Map<string, number>();
   bestWithin(rack: Uint8Array, d: number, minLen: number): number {
+    const mk = rackKey(rack) + "|" + d + "|" + minLen;
+    const hit = this.withinMemo.get(mk);
+    if (hit !== undefined) return hit;
+    const r = this.bestWithinUncached(rack, d, minLen);
+    if (this.withinMemo.size > 100000) this.withinMemo.clear();
+    this.withinMemo.set(mk, r);
+    return r;
+  }
+  private bestWithinUncached(rack: Uint8Array, d: number, minLen: number): number {
     let best = 0;
     let tiles = 0;
     for (let i = 0; i < 26; i++) tiles += rack[i];
@@ -223,6 +233,25 @@ export class WordEngine {
       }
     }
     return best;
+  }
+
+  // Precompute everything a bid on any letter would need for this rack, so
+  // the bid itself is a few map lookups. Runs in small chunks off the event
+  // loop so it never delays an incoming auction.
+  warm(rack: Uint8Array, horizon: number, onDone?: () => void) {
+    this.value(rack, horizon);
+    let i = 0;
+    const step = () => {
+      const end = Math.min(26, i + 3);
+      for (; i < end; i++) {
+        const r = new Uint8Array(rack);
+        r[i]++;
+        this.value(r, horizon);
+      }
+      if (i < 26) setImmediate(step);
+      else onDone?.();
+    };
+    setImmediate(step);
   }
 
   // Heuristic rack value: realizable now plus discounted near-completions.
@@ -271,6 +300,7 @@ const VOWELS = "AEIOU";
 const HEAVY = "QZJXKVW";
 const RATE_DIV = Number(process.env.RATE_DIV ?? 3.5);
 const RATE_CAP = Number(process.env.RATE_CAP ?? 3.5);
+const VALUE_TILT = Number(process.env.VALUE_TILT ?? 0);
 
 /**
  * Economics: cash has no value at the end of the match, only score does.
@@ -322,6 +352,24 @@ export function decideBid(ctx: BidContext): number {
   const rate = Math.max(0.8, Math.min(RATE_CAP, spendPerTile / RATE_DIV));
 
   let bid = delta * rate;
+
+  // Letter-value prior. Reward is linear in letter value and a 7+ word pays
+  // 3x, so a letter's expected contribution is 3 * value * P(it ends up in
+  // a long word). Heavy letters are harder to place but pay far more; the
+  // near-word search alone misses them until a word is almost complete,
+  // which is exactly how a bot ends up with a rack of 1-point tiles.
+  const lv = LETTER_VALUE[letter] ?? 1;
+  let heavyHeld = 0;
+  for (let i = 0; i < 26; i++) if ((LETTER_VALUE[String.fromCharCode(A + i)] ?? 0) >= 4) heavyHeld += rack[i];
+  let pUse = lv >= 8 ? 0.3 : lv >= 4 ? 0.5 : lv >= 2 ? 0.55 : 0.6;
+  if (letter === "Q") pUse = rack["U".charCodeAt(0) - A] > 0 ? 0.35 : 0.1;
+  pUse *= Math.min(1, horizon / 15);
+  if (heavyHeld >= 3) pUse *= 0.5;
+  if (rack[li] >= 1 && lv >= 4) pUse *= 0.5;
+  if (tiles >= 10) pUse *= 0.3;
+  const prior = 3 * lv * pUse;
+  bid = Math.max(bid, prior * rate);
+
   // Early rack building: a small rack has little measurable upside yet,
   // but needs tiles. Keep buying at a paced rate, preferring balance.
   const isVowel = VOWELS.includes(letter);
@@ -329,7 +377,6 @@ export function decideBid(ctx: BidContext): number {
     let floor = spendPerTile * 0.8;
     if (isVowel ? vowels >= tiles * 0.5 + 1 : consonants >= tiles * 0.7 + 1) floor *= 0.5;
     if (rack[li] >= 2) floor *= 0.4;
-    if (HEAVY.includes(letter) && delta <= 0) floor *= 0.3;
     bid = Math.max(bid, floor);
   } else if (delta > 0) {
     bid = Math.max(bid, spendPerTile * 0.5);
@@ -345,6 +392,10 @@ export function decideBid(ctx: BidContext): number {
   if (horizon <= 6 && delta > 0) bid = Math.max(bid, delta * 2 + spendPerTile);
   if (horizon <= 2 && delta > 0) bid = Math.max(bid, balance * 0.8);
   void market;
+
+  // Reward is linear in letter value and 7-letter words pay 3x, so a
+  // 4-point letter in a long word is worth four 1-point letters. Tilt bids
+  // toward valuable letters; Q is capped because it needs a U.
 
   if (ctx.auctionType === "FirstPrice") bid *= 0.7;
 

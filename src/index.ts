@@ -21,7 +21,7 @@ import {
 import { Identity } from "spacetimedb";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Dictionary, WordEngine, chooseWords, decideBid } from "./strategy.js";
+import { Dictionary, WordEngine, chooseWords, decideBid, rackToCounts } from "./strategy.js";
 
 const HOST = process.env.STDB_HOST ?? "https://maincloud.spacetimedb.com";
 const DB_NAME = process.env.STDB_DB ?? "scrabblebot";
@@ -218,6 +218,16 @@ function tryPlayWord(conn: DbConnection) {
   }
 }
 
+// Pre-warm the engine caches for every running match's rack.
+function warmAll(conn: DbConnection) {
+  for (const matchId of myRunningMatches(conn)) {
+    const m = conn.db.matchState.id.find(matchId);
+    if (!m) continue;
+    const rack = rackToCounts(rackForMatch(conn, matchId));
+    ENGINE.warm(rack, Math.max(0, Number(m.bagTotal) - 1));
+  }
+}
+
 function joinLobby(conn: DbConnection) {
   if (myBotId === null) return;
   if (myRunningMatches(conn).length > 0) return;
@@ -302,9 +312,12 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
   // Table callbacks. Registered once; they fire for any subscription.
   conn.db.auction.onInsert((_ctx, a) => tryBid(conn, a));
   conn.db.auction.onUpdate((_ctx, _old, a) => tryBid(conn, a));
-  conn.db.myRack.onInsert(() => tryPlayWord(conn));
-  conn.db.myRack.onUpdate(() => tryPlayWord(conn));
-  conn.db.myRack.onDelete(() => tryPlayWord(conn));
+  // Word plays are deferred so a bid handler in the same transaction runs
+  // first; the auction clock is the only hard deadline we have.
+  const deferPlay = () => setTimeout(() => { tryPlayWord(conn); warmAll(conn); }, 0);
+  conn.db.myRack.onInsert(deferPlay);
+  conn.db.myRack.onUpdate(deferPlay);
+  conn.db.myRack.onDelete(deferPlay);
   conn.db.auctionResult.onInsert((_ctx, r) => {
     if (r.winnerBotId !== undefined && r.winnerBotId !== null && Number(r.paid) > 0) {
       const k = String(r.matchId);
@@ -315,7 +328,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
     if (r.winnerBotId === myBotId) log(`won '${r.letter}' for ${r.paid} (match ${r.matchId})`);
   });
   conn.db.matchState.onUpdate((_ctx, old, neu) => {
-    if (old.bagTotal !== neu.bagTotal && neu.status.tag === "Running") tryPlayWord(conn);
+    if (old.bagTotal !== neu.bagTotal && neu.status.tag === "Running") deferPlay();
     if (old.status.tag !== "Ended" && neu.status.tag === "Ended") {
       const { mine } = participants(conn, neu.id);
       if (mine.found) {
@@ -333,7 +346,7 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
     }
   });
   conn.db.matchParticipant.onUpdate((_ctx, old, neu) => {
-    if (neu.botId === myBotId && old.balance !== neu.balance) tryPlayWord(conn);
+    if (neu.botId === myBotId && old.balance !== neu.balance) deferPlay();
   });
   conn.db.botCredential.onInsert((_ctx, c) => {
     if (myBotId === null && myIdentity && c.identity.isEqual(myIdentity)) {
@@ -464,9 +477,8 @@ function bootstrapActivity(conn: DbConnection) {
   });
   joinLobby(conn);
   setInterval(() => {
-    joinLobby(conn);
     for (const a of conn.db.auction.iter()) if (a.status.tag === "Open") tryBid(conn, a);
-    tryPlayWord(conn);
+    setTimeout(() => { joinLobby(conn); tryPlayWord(conn); warmAll(conn); }, 0);
   }, 1000);
 }
 
