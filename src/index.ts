@@ -63,7 +63,6 @@ type Sub = { unsubscribe(): void };
 
 let myIdentity: Identity | null = null;
 let myBotId: bigint | null = null;
-let registered = false;
 let lastLobbyAttempt = 0;
 const bidsByAuction = new Set<string>();
 const inflightByMatch = new Map<string, number>();
@@ -413,22 +412,56 @@ function afterBotKnown(conn: DbConnection) {
     ]);
 }
 
-function bootstrapActivity(conn: DbConnection) {
-  const bot = myBotId !== null ? conn.db.bot.id.find(myBotId) : undefined;
-  log(`ready as '${bot?.name ?? "?"}' (id ${myBotId})`);
-  if (TOURNAMENT_ID && !registered) {
-    registered = true;
-    const tid = BigInt(TOURNAMENT_ID);
+const registrationTried = new Set<string>();
+
+// Register for a tournament once. With TOURNAMENT_ID set, only that one;
+// otherwise (AUTO_REGISTER, default on) any tournament open for
+// registration, so a freshly created tournament is joined without a restart.
+function registerIfOpen(conn: DbConnection) {
+  if (myBotId === null) return;
+  const auto = (process.env.AUTO_REGISTER ?? "1") !== "0";
+  for (const t of conn.db.tournament.iter()) {
+    const tid = t.id;
+    if (TOURNAMENT_ID && BigInt(TOURNAMENT_ID) !== tid) continue;
+    if (!TOURNAMENT_ID && (!auto || t.status.tag !== "Registration")) continue;
+    const key = String(tid);
+    if (registrationTried.has(key)) continue;
     const already = Array.from(conn.db.tournamentEntry.iter()).some(
       (e) => e.tournamentId === tid && e.botId === myBotId,
     );
-    if (already) log(`already registered for tournament ${TOURNAMENT_ID}`);
-    else
-      conn.reducers
-        .registerForTournament({ tournamentId: tid })
-        .then(() => log(`registered for tournament ${TOURNAMENT_ID}`))
-        .catch(logFailure(`registering for tournament ${TOURNAMENT_ID}`));
+    registrationTried.add(key);
+    if (already) {
+      log(`already registered for tournament ${tid}`);
+      continue;
+    }
+    conn.reducers
+      .registerForTournament({ tournamentId: tid })
+      .then(() => log(`registered for tournament ${tid} (${t.status.tag})`))
+      .catch((err: unknown) => {
+        registrationTried.delete(key);
+        logFailure(`registering for tournament ${tid}`)(err);
+      });
   }
+}
+
+function bootstrapActivity(conn: DbConnection) {
+  const bot = myBotId !== null ? conn.db.bot.id.find(myBotId) : undefined;
+  log(`ready as '${bot?.name ?? "?"}' (id ${myBotId})`);
+  registerIfOpen(conn);
+  conn.db.tournament.onInsert((_ctx, t) => {
+    log(`tournament ${t.id} appeared (${t.status.tag})`);
+    registerIfOpen(conn);
+  });
+  conn.db.tournament.onUpdate((_ctx, old, neu) => {
+    if (old.status.tag !== neu.status.tag) log(`tournament ${neu.id}: ${old.status.tag} -> ${neu.status.tag}`);
+    registerIfOpen(conn);
+  });
+  conn.db.tournamentEntry.onDelete((_ctx, e) => {
+    if (e.botId === myBotId) {
+      log(`entry for tournament ${e.tournamentId} removed`);
+      registrationTried.delete(String(e.tournamentId));
+    }
+  });
   joinLobby(conn);
   setInterval(() => {
     joinLobby(conn);

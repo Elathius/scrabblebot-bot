@@ -64,8 +64,12 @@ npm install
 BOT_NAME=<name> BOT_TOKEN=<token> npm start
 # Later runs (token is cached in .token-<name>, which is git-ignored)
 BOT_NAME=<name> npm start
-# Register for a tournament
+# Tournaments: by default the bot registers itself for any tournament that
+# is open for registration, including ones created after it starts.
+# To pin a single tournament instead:
 BOT_NAME=<name> TOURNAMENT_ID=<id> npm start
+# To disable auto-registration:
+AUTO_REGISTER=0 BOT_NAME=<name> npm start
 ```
 
 `src/module_bindings` are the generated SpacetimeDB bindings copied from the
