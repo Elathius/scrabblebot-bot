@@ -205,16 +205,49 @@ export class WordEngine {
     return best;
   }
 
+  // Best reward among words at most `d` tiles short of the rack, length >= minLen.
+  bestWithin(rack: Uint8Array, d: number, minLen: number): number {
+    let best = 0;
+    let tiles = 0;
+    for (let i = 0; i < 26; i++) tiles += rack[i];
+    const maxL = Math.min(tiles + d, this.dict.maxLen);
+    for (let L = maxL; L >= minLen; L--) {
+      const bucket = this.dict.byLength[L];
+      if (!bucket) continue;
+      for (const e of bucket) {
+        if (e.reward <= best) break;
+        if (deficit(e, rack, d) <= d) {
+          best = e.reward;
+          break;
+        }
+      }
+    }
+    return best;
+  }
+
   // Heuristic rack value: realizable now plus discounted near-completions.
   value(rack: Uint8Array, horizon: number): number {
     const now = this.best(rack).total;
     if (horizon <= 0) return now;
-    // Chance of completing a one-away word shrinks as the horizon shrinks.
-    const w1 = Math.min(0.5, 0.08 * horizon);
-    const w2 = Math.min(0.22, 0.03 * horizon);
-    const near1 = this.bestNear(rack, 1, 5);
-    const near2 = horizon >= 5 ? this.bestNear(rack, 2, 7) : 0;
-    return now + w1 * Math.max(0, near1 - now) + w2 * Math.max(0, near2 - now);
+    // Seven-letter words pay 3x, so the rack's upside is the best 7+ word
+    // it is close to, discounted by how many tiles are still missing and
+    // how many auctions remain to find them. Take the max, not the sum, so
+    // overlapping targets are not double counted.
+    const w = [
+      0,
+      Math.min(0.6, 0.1 * horizon),
+      Math.min(0.35, 0.05 * horizon),
+      Math.min(0.18, 0.025 * horizon),
+    ];
+    let up = 0;
+    for (let d = 1; d <= 3; d++) {
+      const r = this.bestWithin(rack, d, 7);
+      up = Math.max(up, w[d] * Math.max(0, r - now));
+    }
+    // Medium words one tile away are a solid fallback.
+    const r5 = this.bestWithin(rack, 1, 5);
+    up = Math.max(up, Math.min(0.5, 0.08 * horizon) * Math.max(0, r5 - now));
+    return now + up;
   }
 }
 
@@ -279,36 +312,38 @@ export function decideBid(ctx: BidContext): number {
   // Fair share of what is left, and what we can afford per expected win.
   const fairShare = Math.max(1, usable / numBots);
   const spendPerTile = balance / fairShare;
-  const market = ctx.marketPrice && ctx.marketPrice > 0 ? ctx.marketPrice : 9;
+  const market = ctx.marketPrice && ctx.marketPrice > 0 ? ctx.marketPrice : 10;
 
-  // Letter quality relative to our rack.
-  let q = 1.0;
-  q += delta / 10;
+  // Coins per expected point. Cash is worthless at the end, so the rate
+  // rises when we are sitting on more cash than the remaining auctions can
+  // absorb, and falls as the bankroll thins out.
+  const rate = Math.max(0.8, Math.min(2.5, spendPerTile / 6));
+
+  let bid = delta * rate;
+  // Early rack building: a small rack has little measurable upside yet,
+  // but needs tiles. Keep buying at a paced rate, preferring balance.
   const isVowel = VOWELS.includes(letter);
-  if (isVowel) {
-    if (vowels < tiles * 0.35) q += 0.3;
-    else if (vowels >= tiles * 0.5 + 1) q -= 0.4;
-  } else {
-    if (consonants < tiles * 0.5) q += 0.25;
-    else if (consonants >= tiles * 0.7 + 1) q -= 0.3;
+  if (tiles < 7 && horizon > 10) {
+    let floor = spendPerTile * 0.8;
+    if (isVowel ? vowels >= tiles * 0.5 + 1 : consonants >= tiles * 0.7 + 1) floor *= 0.5;
+    if (rack[li] >= 2) floor *= 0.4;
+    if (HEAVY.includes(letter) && delta <= 0) floor *= 0.3;
+    bid = Math.max(bid, floor);
+  } else if (delta > 0) {
+    bid = Math.max(bid, spendPerTile * 0.5);
   }
-  if (rack[li] >= 2 && delta <= 0) q -= 0.35;
-  if (HEAVY.includes(letter) && delta <= 0) q -= 0.35;
-  if (tiles >= 10 && delta <= 0) q *= 0.4;
-  if (tiles >= 13 && delta <= 0) q = 0;
-  q = Math.max(0, Math.min(3, q));
-
-  let bid = spendPerTile * q;
-  // A letter that improves the rack is worth at least the going rate.
-  if (delta > 0) bid = Math.max(bid, market * 0.9 + delta * 0.5);
+  if (rack[li] >= 3) bid *= 0.3;
+  if (tiles >= 11 && delta <= 0) bid = 0;
+  if (tiles >= 14) bid = 0;
   // Late game: cash is losing its value fast, lean in on real gains.
   if (horizon <= 6 && delta > 0) bid = Math.max(bid, delta * 2 + spendPerTile);
   if (horizon <= 2 && delta > 0) bid = Math.max(bid, balance * 0.8);
+  void market;
 
   if (ctx.auctionType === "FirstPrice") bid *= 0.7;
 
   // Cheap pickups: unbid tiles vanish, so a reserve-price bid is free value.
-  if (bid < 1 && q > 0 && tiles < 9) bid = 1;
+  if (bid < 1 && tiles < 9 && !(rack[li] >= 3)) bid = 1;
 
   return Math.max(0, Math.min(balance, Math.floor(bid)));
 }

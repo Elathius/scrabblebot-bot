@@ -71,6 +71,7 @@ const INFLIGHT_TIMEOUT_MS = 2500;
 const matchSubs = new Map<string, Sub[]>();
 const paidByMatch = new Map<string, number[]>();
 const bootstrapped = new Set<string>();
+const holdLogged = new Set<string>();
 
 function log(msg: string) {
   console.log(`[${BOT_NAME}] ${msg}`);
@@ -192,7 +193,14 @@ function tryPlayWord(conn: DbConnection) {
       engine: ENGINE,
     });
     const word = decision.words[0];
-    if (!word) continue;
+    if (!word) {
+      const hk = `${key}:${m.bagTotal}`;
+      if (!holdLogged.has(hk) && Number(m.bagTotal) % 5 === 0) {
+        holdLogged.add(hk);
+        log(`match ${matchId}: hold (${decision.reason}; rack ${[...rack].map(([l, n]) => l.repeat(n)).join("")}; bag ${m.bagTotal}; bal ${mine.balance})`);
+      }
+      continue;
+    }
     inflightByMatch.set(key, now);
     log(
       `match ${matchId}: playing '${word}' (${decision.reason}; plan ${decision.words.join("+")}=${decision.total}; rack ${[...rack].map(([l, n]) => l.repeat(n)).join("")}; ${(performance.now() - t0).toFixed(0)}ms)`,
