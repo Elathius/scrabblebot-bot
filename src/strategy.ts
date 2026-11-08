@@ -301,6 +301,7 @@ const HEAVY = "QZJXKVW";
 const RATE_DIV = Number(process.env.RATE_DIV ?? 3.5);
 const RATE_CAP = Number(process.env.RATE_CAP ?? 3.5);
 const VALUE_TILT = Number(process.env.VALUE_TILT ?? 0);
+const SHARE = Number(process.env.SHARE ?? 1);
 
 /**
  * Economics: cash has no value at the end of the match, only score does.
@@ -342,7 +343,9 @@ export function decideBid(ctx: BidContext): number {
   if (horizon === 0) return delta > 0 ? balance : 0;
 
   // Fair share of what is left, and what we can afford per expected win.
-  const fairShare = Math.max(1, usable / numBots);
+  // Target share of the remaining tiles. Word earnings recycle into more
+  // tiles, so a strong word engine can profitably take more than 1/n.
+  const fairShare = Math.max(1, (usable / numBots) * SHARE);
   const spendPerTile = balance / fairShare;
   const market = ctx.marketPrice && ctx.marketPrice > 0 ? ctx.marketPrice : 10;
 
