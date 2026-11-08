@@ -269,6 +269,8 @@ export interface BidContext {
 
 const VOWELS = "AEIOU";
 const HEAVY = "QZJXKVW";
+const RATE_DIV = Number(process.env.RATE_DIV ?? 3.5);
+const RATE_CAP = Number(process.env.RATE_CAP ?? 3.5);
 
 /**
  * Economics: cash has no value at the end of the match, only score does.
@@ -317,7 +319,7 @@ export function decideBid(ctx: BidContext): number {
   // Coins per expected point. Cash is worthless at the end, so the rate
   // rises when we are sitting on more cash than the remaining auctions can
   // absorb, and falls as the bankroll thins out.
-  const rate = Math.max(0.8, Math.min(2.5, spendPerTile / 6));
+  const rate = Math.max(0.8, Math.min(RATE_CAP, spendPerTile / RATE_DIV));
 
   let bid = delta * rate;
   // Early rack building: a small rack has little measurable upside yet,
@@ -331,6 +333,10 @@ export function decideBid(ctx: BidContext): number {
     bid = Math.max(bid, floor);
   } else if (delta > 0) {
     bid = Math.max(bid, spendPerTile * 0.5);
+  } else if (horizon > 2 && tiles < 9 && rack[li] < 2 && spendPerTile > 8) {
+    // Cash is piling up relative to what is left to buy: keep acquiring
+    // usable letters so it gets converted before the end.
+    bid = Math.max(bid, spendPerTile * (HEAVY.includes(letter) ? 0.3 : 0.6));
   }
   if (rack[li] >= 3) bid *= 0.3;
   if (tiles >= 11 && delta <= 0) bid = 0;

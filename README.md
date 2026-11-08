@@ -79,3 +79,13 @@ npm test   # strategy tests
 ## License
 
 MIT, same as the upstream starter. See `LICENSE`.
+
+## Offline arena
+
+`npx tsx sim/sim.ts 30` replays the server rules (Vickrey, random ties,
+consumed unbid tiles, unplayable final tile) against the server's simulated
+strategies, the official starter, a mirror of this bot, and "one-prompt AI"
+style bots that pace spending and hold for 5+ letter words. Over 30 games
+the bot averaged about 120 points, finishing first in 22 and never below
+fourth. Those opponents are not the real field, so treat it as a tuning
+harness, not a guarantee.
