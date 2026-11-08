@@ -210,10 +210,10 @@ export class WordEngine {
     const now = this.best(rack).total;
     if (horizon <= 0) return now;
     // Chance of completing a one-away word shrinks as the horizon shrinks.
-    const w1 = Math.min(0.45, 0.08 * horizon);
-    const w2 = Math.min(0.15, 0.025 * horizon);
+    const w1 = Math.min(0.5, 0.08 * horizon);
+    const w2 = Math.min(0.22, 0.03 * horizon);
     const near1 = this.bestNear(rack, 1, 5);
-    const near2 = horizon >= 6 ? this.bestNear(rack, 2, 6) : 0;
+    const near2 = horizon >= 5 ? this.bestNear(rack, 2, 7) : 0;
     return now + w1 * Math.max(0, near1 - now) + w2 * Math.max(0, near2 - now);
   }
 }
@@ -227,11 +227,24 @@ export interface BidContext {
   myRack: Map<string, number>;
   bagTotal: number; // tiles still undrawn (excludes the offered tile)
   auctionType: "Vickrey" | "FirstPrice";
+  numBots: number; // participants in this match
+  marketPrice?: number; // median price paid so far in this match
   myScore?: number;
   opponents?: { balance: number; score: number }[];
   engine: WordEngine;
 }
 
+const VOWELS = "AEIOU";
+const HEAVY = "QZJXKVW";
+
+/**
+ * Economics: cash has no value at the end of the match, only score does.
+ * So the goal is to convert the whole bankroll into tiles that become long
+ * words. We size bids so that winning our fair share of the remaining
+ * usable auctions spends everything, then tilt each bid by how much this
+ * letter helps the rack. Vickrey means we pay the runner-up's bid, so
+ * bidding our true value costs little when we are the only one who wants it.
+ */
 export function decideBid(ctx: BidContext): number {
   const balance = Math.max(0, Math.floor(ctx.myBalance));
   if (balance <= 0) return 0;
@@ -244,40 +257,59 @@ export function decideBid(ctx: BidContext): number {
 
   const rack = rackToCounts(ctx.myRack);
   let tiles = 0;
-  for (let i = 0; i < 26; i++) tiles += rack[i];
+  let vowels = 0;
+  for (let i = 0; i < 26; i++) {
+    tiles += rack[i];
+    if (VOWELS.includes(String.fromCharCode(A + i))) vowels += rack[i];
+  }
+  const consonants = tiles - vowels;
 
-  // Usable horizon: auctions after this one whose tile we could still use.
-  const horizon = Math.max(0, ctx.bagTotal - 1);
+  // Usable auctions including this one; horizon = those after this one.
+  const usable = ctx.bagTotal;
+  const horizon = usable - 1;
+  const numBots = Math.max(2, ctx.numBots || 6);
 
   const withTile = new Uint8Array(rack);
   withTile[li]++;
   const delta = ctx.engine.value(withTile, horizon) - ctx.engine.value(rack, horizon);
 
-  // Opportunity cost of cash falls as the game runs out of tiles to buy.
-  // lambda ~ 1 early (a coin spent now is a coin not spent later), -> 0 late.
-  const lambda = Math.min(1, horizon / 30);
+  // Last usable tile: cash is worthless afterwards. Pay anything for gain.
+  if (horizon === 0) return delta > 0 ? balance : 0;
 
-  let bid: number;
-  if (horizon === 0) {
-    // Last usable tile: cash has no future value. Pay anything for gain.
-    bid = delta > 0 ? balance : 0;
+  // Fair share of what is left, and what we can afford per expected win.
+  const fairShare = Math.max(1, usable / numBots);
+  const spendPerTile = balance / fairShare;
+  const market = ctx.marketPrice && ctx.marketPrice > 0 ? ctx.marketPrice : 9;
+
+  // Letter quality relative to our rack.
+  let q = 1.0;
+  q += delta / 10;
+  const isVowel = VOWELS.includes(letter);
+  if (isVowel) {
+    if (vowels < tiles * 0.35) q += 0.3;
+    else if (vowels >= tiles * 0.5 + 1) q -= 0.4;
   } else {
-    // Vickrey: bid our value (discounted by cash's future worth). We only
-    // pay the second price, so shading is modest.
-    const v = delta / (0.55 + 0.45 * lambda);
-    bid = Math.round(ctx.auctionType === "FirstPrice" ? v * 0.65 : v);
-    // Cheap pickups: unbid tiles vanish, so any useful letter is worth the
-    // reserve price of 1 while the rack has room.
-    if (bid < 1 && tiles < 9 && balance > 12) {
-      const common = "AEIOURSTLN".includes(letter);
-      if (common || delta > 0) bid = common ? 2 : 1;
-    }
-    // Pacing: do not blow most of the bank early unless the gain is huge.
-    const cap = horizon > 20 ? 0.4 : horizon > 8 ? 0.6 : 1.0;
-    bid = Math.min(bid, Math.floor(balance * cap) + (delta > 25 ? 10 : 0));
+    if (consonants < tiles * 0.5) q += 0.25;
+    else if (consonants >= tiles * 0.7 + 1) q -= 0.3;
   }
-  // Full racks: stop hoarding unless the tile completes something now.
-  if (tiles >= 11 && delta <= 0) bid = 0;
+  if (rack[li] >= 2 && delta <= 0) q -= 0.35;
+  if (HEAVY.includes(letter) && delta <= 0) q -= 0.35;
+  if (tiles >= 10 && delta <= 0) q *= 0.4;
+  if (tiles >= 13 && delta <= 0) q = 0;
+  q = Math.max(0, Math.min(3, q));
+
+  let bid = spendPerTile * q;
+  // A letter that improves the rack is worth at least the going rate.
+  if (delta > 0) bid = Math.max(bid, market * 0.9 + delta * 0.5);
+  // Late game: cash is losing its value fast, lean in on real gains.
+  if (horizon <= 6 && delta > 0) bid = Math.max(bid, delta * 2 + spendPerTile);
+  if (horizon <= 2 && delta > 0) bid = Math.max(bid, balance * 0.8);
+
+  if (ctx.auctionType === "FirstPrice") bid *= 0.7;
+
+  // Cheap pickups: unbid tiles vanish, so a reserve-price bid is free value.
+  if (bid < 1 && q > 0 && tiles < 9) bid = 1;
+
   return Math.max(0, Math.min(balance, Math.floor(bid)));
 }
 
@@ -285,6 +317,7 @@ export interface WordContext {
   myRack: Map<string, number>;
   bagTotal: number;
   myBalance: number;
+  numBots?: number;
   engine: WordEngine;
 }
 
@@ -296,6 +329,9 @@ export interface WordDecision {
 
 /**
  * Decide which words (if any) to play now. Returns an empty list to hold.
+ * Seven-letter words pay 3x and dominate scoring, so the rack is built
+ * toward them; shorter words are played when they are strong, when cash is
+ * needed to keep buying, when the rack is crowded, or when time is short.
  */
 export function chooseWords(ctx: WordContext): WordDecision {
   const rack = rackToCounts(ctx.myRack);
@@ -307,34 +343,42 @@ export function chooseWords(ctx: WordContext): WordDecision {
   if (plan.words.length === 0) return { words: [], total: 0, reason: "nothing playable" };
 
   const horizon = Math.max(0, ctx.bagTotal - 1);
+  const numBots = Math.max(2, ctx.numBots ?? 6);
 
   // Endgame: liquidate everything while there is still time to be confirmed.
-  if (horizon <= 3) return { ...plan, reason: "endgame liquidation" };
+  if (horizon <= 4) return { ...plan, reason: "endgame liquidation" };
 
   const bestWord = plan.words[0];
   const bestLen = bestWord.length;
+  const bestReward = reward(bestWord);
 
-  // Strong plays: take them. Multiplier is maxed at 7 letters, and a
-  // confirmed 5+ letter word is good money now.
   if (bestLen >= 7) return { words: [bestWord], total: plan.total, reason: "7+ word" };
-  if (bestLen >= 5 && reward(bestWord) >= 14)
+
+  // Can one more tile make a 7+? Then keep building unless we must cash in.
+  const near7 = ctx.engine.bestNear(rack, 1, 7);
+  const near7b = ctx.engine.bestNear(rack, 2, 7);
+  const spendPerTile = ctx.myBalance / Math.max(1, ctx.bagTotal / numBots);
+  const cashStarved = ctx.myBalance < 12 || spendPerTile < 5;
+  const crowded = tiles >= 10;
+
+  if (!cashStarved && !crowded && horizon >= 8) {
+    if (near7 > bestReward * 1.1) return { words: [], total: 0, reason: `hold: 1 from ${near7}` };
+    if (near7b > bestReward * 1.6 && tiles <= 8)
+      return { words: [], total: 0, reason: `hold: 2 from ${near7b}` };
+  }
+
+  // Strong 5-6 letter word with no 7 in sight: take it.
+  if (bestLen >= 5 && bestReward >= 16)
     return { words: [bestWord], total: plan.total, reason: "strong 5-6 word" };
 
-  // Hold while a near-complete long word is clearly better than cashing in.
-  const near = ctx.engine.bestNear(rack, 1, 6);
-  const holdBonus = Math.min(0.5, 0.08 * horizon) * near;
-  const cashStarved = ctx.myBalance < 10;
-  const crowded = tiles >= 9;
-
-  if (!cashStarved && !crowded && holdBonus > plan.total && tiles <= 8)
-    return { words: [], total: 0, reason: `hold for near word (${near})` };
-
-  // Otherwise convert when the rack is crowded, cash is low, or the plan is
-  // decent relative to what we hold.
-  if (crowded || cashStarved || plan.total >= 10 || tiles >= 7)
+  if (crowded) return { words: [bestWord], total: plan.total, reason: "crowded" };
+  if (cashStarved && bestReward >= 6)
+    return { words: [bestWord], total: plan.total, reason: "cash flow" };
+  if (horizon <= 12 && tiles >= 7)
+    return { words: [bestWord], total: plan.total, reason: "late convert" };
+  if (bestLen >= 5 && tiles >= 9)
     return { words: [bestWord], total: plan.total, reason: "convert" };
 
-  // Small rack, weak words, mid-game: keep building.
   return { words: [], total: 0, reason: "building" };
 }
 

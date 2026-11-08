@@ -41,6 +41,15 @@ official [bot starter](https://github.com/clockworklabs/scrabblebot/tree/main/bo
   more than cashing in now. Convert when crowded, cash-starved, or late.
 
 **Reliability** (`src/index.ts`)
+- Subscribes only to this bot's own rows and the matches it is seated in,
+  via filtered SQL subscriptions. `subscribeToAllTables` (what the starter
+  does) streams every match on the server through the client; in live play
+  that delayed reducer replies by seconds and every bid arrived after the
+  auction had closed.
+- Bid deadline guard: skips a bid when fewer than 150 ms remain.
+- Tracks the median price paid in the current match and the number of
+  seated bots; bids are sized so winning a fair share of the remaining
+  tiles spends the whole bankroll, since cash is worth nothing at the end.
 - One word submission in flight per match with timeout, re-plan after each
   confirmation (multiword plans and liquidation).
 - Re-plans on rack changes *and* on match progression (`bagTotal`).
