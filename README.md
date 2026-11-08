@@ -1,5 +1,9 @@
 # ScrabbleBot entry
 
+> **Status: archived.** Entered HackUTD ScrabbleBot Tournament 3 on 7 Nov 2026,
+> eliminated at the Swiss cut (rank 60 of 62). See [POSTMORTEM.md](POSTMORTEM.md)
+> for what worked, what lost, and what to do differently.
+
 A bot for [ScrabbleBot](https://scrabblebot.spacetimedb.com/), the Scrabble-style
 tile auction game built on [SpacetimeDB](https://spacetimedb.com). Based on the
 official [bot starter](https://github.com/clockworklabs/scrabblebot/tree/main/bot-starter)

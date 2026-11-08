@@ -377,7 +377,11 @@ export function decideBid(ctx: BidContext): number {
   // but needs tiles. Keep buying at a paced rate, preferring balance.
   const isVowel = VOWELS.includes(letter);
   if (tiles < 7 && horizon > 10) {
+    // With few tiles every letter looks alike to the near-word search, so
+    // without this the bot sits on cash bidding under the market for half
+    // the game. Stay at the going rate while we can afford it.
     let floor = spendPerTile * 0.8;
+    if (balance >= market * 3) floor = Math.max(floor, market * 0.9);
     if (isVowel ? vowels >= tiles * 0.5 + 1 : consonants >= tiles * 0.7 + 1) floor *= 0.5;
     if (rack[li] >= 2) floor *= 0.4;
     bid = Math.max(bid, floor);
