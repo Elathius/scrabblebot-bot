@@ -86,6 +86,13 @@ tournament build (letter-value prior + market-rate early floor).
 - Watch the server's `bot_credential.connected` flag, not the client's
   opinion, after any network event.
 
+## Related documents
+
+- `docs/brief.md` — the pre-event research brief: verified game mechanics,
+  dictionary findings, strategy proposals, and the setup flow. Written before
+  any code; several of its warnings (starter lifecycle, subscription load,
+  endgame tile) turned out to be exactly the live failures.
+
 ## Repository map
 
 - `src/strategy.ts` — dictionary preprocessing, exact multiword solver,
